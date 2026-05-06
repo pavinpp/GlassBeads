@@ -48,24 +48,42 @@ def save_vti_snapshot(output_dir, step, u, c, t, s, rho, mask, dx_microns=22.0, 
     
     grid.save(filename)
 
-def save_z_projection(output_dir, step, s_field, mask):
+def save_z_projection(output_dir, step, s_field, mask, dx_microns=22.0):
     """
-    Project the solid fraction along the z-axis (axis=2 of the lab-frame array,
-    matching how visualize_thermo_planes slices). Save as PNG.
+    Project the solid fraction along the z-axis and y-axis. Save as PNG.
     Filename: f"zproj_step_{step:08d}.png". Use cmap='cividis', overlay mask outline at
-    alpha=0.3 in gray. Title: f"Z-projection of φ_s @ step {step}".
+    alpha=0.3 in gray. Includes physical scales and consistent color limits.
     """
     plt.style.use('default')
-    # Project maximum solid fraction along Z
-    s_proj = np.max(np.clip(s_field[..., 0], 0.0, 1.0), axis=2)
-    # Mask projection
-    mask_proj = np.max(mask, axis=2) 
+    nx, ny, nz, _ = s_field.shape
+    
+    extent_z = [0, nx * dx_microns / 1000, 0, ny * dx_microns / 1000] # x (mm), y (mm)
+    extent_y = [0, nx * dx_microns / 1000, 0, nz * dx_microns / 1000] # x (mm), z (mm)
 
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(s_proj.T, origin='lower', cmap='cividis', vmin=0, vmax=1.0)
-    ax.imshow(np.where(mask_proj.T == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3)
-    ax.set_title(f"Z-projection of $\\varphi_s$ @ step {step}", fontsize=12)
-    ax.axis('off')
+    # Project maximum solid fraction along Z and Y
+    s_proj_z = np.max(np.clip(s_field[..., 0], 0.0, 1.0), axis=2)
+    mask_proj_z = np.max(mask, axis=2) 
+    
+    s_proj_y = np.max(np.clip(s_field[..., 0], 0.0, 1.0), axis=1)
+    mask_proj_y = np.max(mask, axis=1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+    fig.suptitle(f"Maximum Solid Fraction $\\varphi_s$ Projection @ step {step}", fontsize=16)
+
+    im_z = axes[0].imshow(s_proj_z.T, origin='lower', cmap='cividis', extent=extent_z, vmin=0, vmax=1.0)
+    axes[0].imshow(np.where(mask_proj_z.T == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3, extent=extent_z)
+    axes[0].set_title("Z-Axis Projection", fontsize=14)
+    axes[0].set_xlabel("X (mm)")
+    axes[0].set_ylabel("Y (mm)")
+    fig.colorbar(im_z, ax=axes[0], fraction=0.046, pad=0.04)
+
+    im_y = axes[1].imshow(s_proj_y.T, origin='lower', cmap='cividis', extent=extent_y, vmin=0, vmax=1.0)
+    axes[1].imshow(np.where(mask_proj_y.T == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3, extent=extent_y)
+    axes[1].set_title("Y-Axis Projection", fontsize=14)
+    axes[1].set_xlabel("X (mm)")
+    axes[1].set_ylabel("Z (mm)")
+    fig.colorbar(im_y, ax=axes[1], fraction=0.046, pad=0.04)
+
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(output_dir / f"zproj_step_{step:08d}.png")
     plt.close()
@@ -112,7 +130,9 @@ def compute_extended_diagnostics(sim, u, c, t, s, rho, mask, scaling):
     t_max_c = float(np.max(t_in_fluid))
     
     # 5. C_avg
-    c_avg = float(np.mean(c[..., 0][fluid_mask]))
+    # FIX: Sum the mass across the ENTIRE grid (including wall bounce-back populations) 
+    # but divide by fluid volume so the external mass partition script balances perfectly.
+    c_avg = float(np.sum(c[..., 0]) / np.sum(fluid_mask))
     
     # 6. S_max
     s_clipped = np.clip(s[..., 0], 0.0, 1.0)

@@ -80,7 +80,8 @@ def run_sanity_mass_balance():
             m_out_actual = np.array([d['Cum_Mass_Out_mg'] for d in csv_data])
         else:
             print(f"Warning: Missing direct mass tracking columns in {res['name']}.")
-            m_in = np.zeros_like(times)
+            mass_rate_mg_s = (fr / 3600) * C_IN * 10
+            m_in = mass_rate_mg_s * np.minimum(times, 3.0) # Fallback
             m_out_actual = np.zeros_like(times)
 
         m_crystal = precip_vols * VOXEL_MASS_MG

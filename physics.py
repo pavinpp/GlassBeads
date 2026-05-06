@@ -19,28 +19,51 @@ from src.boundary_conditions import EquilibriumBC, BounceBack
 class ThermoScaling:
     def __init__(self, dx_microns=22.0, q_ml_hr=10.0, diameter_mm=1.2,
                  nu_phys=1.0e-6, d_phys=5.0e-10, alpha_fluid=1.43e-7, alpha_solid=5.0e-7,
-                 g_phys=-9.81, tau=0.70,
+                 g_phys=-9.81, mach_per_mm=0.004, 
                  delta_c_nuc_phys=5.0, delta_c_grow_phys=0.5,
-                 k_nuc=0.0005, k_grow=0.025, phi_s_seed=0.01,
-                 alpha_housing_flow=0.0001, alpha_housing_shutin=0.005):
+                 base_k_nuc=0.001, base_k_grow=0.025, phi_s_seed=0.01,
+                 base_alpha_flow=0.0001, base_alpha_shutin=0.005):
+        
         self.dx = dx_microns * 1e-6
         self.q_ml_hr = q_ml_hr
         self.diameter = diameter_mm * 1e-3
-        # Split housing thermal resistance into dynamic phases
-        self.alpha_housing_flow = alpha_housing_flow
-        self.alpha_housing_shutin = alpha_housing_shutin
-
-        # Fluid
         self.nu_phys = nu_phys
         self.g_phys = g_phys
-        self.tau = tau
-        self.nu_lu = (2 * self.tau - 1) / 6
+        self.cs = 1.0 / np.sqrt(3.0)
+        self.cs2 = 1.0 / 3.0
+
+        # 1. Compute physical velocity (Darcy) based on domain diameter
+        self.u_darcy_phys = ((self.q_ml_hr * 1e-6) / 3600.0) / (np.pi * (self.diameter / 2.0)**2)
+
+        # 2. Reverse-engineer the required timestep (dt) to hit the target Mach number
+        dynamic_target_mach = mach_per_mm * diameter_mm
+        u_lu_target = dynamic_target_mach * self.cs
+        dt_target = (u_lu_target * self.dx) / self.u_darcy_phys
+
+        # 3. Calculate required Tau for this dt (unbounded for maximum speed)
+        tau_auto = 0.5 + 3.0 * (dt_target * self.nu_phys) / (self.dx**2)
+        self.tau = min(tau_auto, 20.0) 
+
+        # Recalculate actual dt and mach based on the clamped tau
+        self.nu_lu = (2 * self.tau - 1) / 6.0
         self.dt = self.nu_lu * (self.dx**2 / self.nu_phys)
+        self.u_in_lu = self.u_darcy_phys * (self.dt / self.dx)
+        self.ma_actual = self.u_in_lu / float(self.cs)
+        self.ma_target = self.ma_actual
+
+        # 4. Calculate the Dynamic Speedup Factor relative to your stable baseline (tau=0.7)
+        dt_baseline = ((2 * 0.70 - 1) / 6.0) * (self.dx**2 / self.nu_phys)
+        self.speedup_factor = self.dt / dt_baseline
+
+        # 5. Auto-scale Kinetic and Thermal Rates
+        self.k_nuc = base_k_nuc * self.speedup_factor
+        self.k_grow = base_k_grow * self.speedup_factor
+        self.alpha_housing_flow = min(1.0, base_alpha_flow * self.speedup_factor)
+        self.alpha_housing_shutin = min(1.0, base_alpha_shutin * self.speedup_factor)
 
         # Solute (CuSO4)
         self.d_phys = d_phys
         self.d_lu_target = self.d_phys * (self.dt / self.dx**2)
-        self.cs2 = 1.0 / 3.0
         self.tau_c = max(0.55, self.d_lu_target / self.cs2 + 0.5)
         self.d_lu = (self.tau_c - 0.5) * self.cs2
         self.omega_c = 1.0 / self.tau_c
@@ -57,8 +80,6 @@ class ThermoScaling:
         # CNT Kinetics
         self.delta_c_nuc_norm = delta_c_nuc_phys / self.c_ref_phys
         self.delta_c_grow_norm = delta_c_grow_phys / self.c_ref_phys
-        self.k_nuc = k_nuc
-        self.k_grow = k_grow
         self.phi_s_seed = phi_s_seed
         assert delta_c_grow_phys < delta_c_nuc_phys, "Growth threshold must be below nucleation threshold (MZW physics)"
 
@@ -73,7 +94,7 @@ class ThermoScaling:
         self.omega_t_s = 1.0 / self.tau_t_s
 
         # Volume / mass conversion
-        self.v_vox_ml  = (self.dx * 100)**3          # m → cm → mL
+        self.v_vox_ml  = (self.dx * 100)**3          
         self.v_vox_mm3 = (self.dx * 1000)**3
         self.mass_per_voxel_mg = (self.c_ref_phys / 100.0) * self.v_vox_ml * 1000.0
 
@@ -83,13 +104,7 @@ class ThermoScaling:
         #                  = c_ref_phys / 228.4 (dimensionless volume fraction per unit normalized mass)
         self.rho_solid_phys = 2.284  # g/cm³
         self.mass_to_volume_factor = self.c_ref_phys / (100.0 * self.rho_solid_phys)
-
-        # Velocities
-        self.u_darcy_phys = ((self.q_ml_hr * 1e-6) / 3600.0) / (np.pi * (self.diameter / 2.0)**2)
-        self.u_in_lu = self.u_darcy_phys * (self.dt / self.dx)
         self.g_lu = self.g_phys * (self.dt**2 / self.dx)
-        self.cs = 1.0 / jnp.sqrt(3.0)
-        self.ma_target = self.u_in_lu / float(self.cs)
 
     def get_solubility(self, t_phys):
         return 0.0051 * (t_phys**2) + 0.384 * t_phys + 23.09

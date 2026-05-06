@@ -51,11 +51,10 @@ def run_optimized_study():
         dx_microns=dx_microns,
         q_ml_hr=args.flow_rate,
         diameter_mm=args.crop_mm,
-        tau=0.70,
         delta_c_nuc_phys=2.0,
         delta_c_grow_phys=0.5,
-        k_nuc=0.001,
-        k_grow=0.025
+        base_k_nuc=0.001,
+        base_k_grow=0.025
     )
 
     # 2. Dynamic Shut-In Calculation

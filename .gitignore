@@ -160,3 +160,4 @@ log_fr*_gpu*.txt
 # Data and Backups
 _backup/
 results/
+results*/
