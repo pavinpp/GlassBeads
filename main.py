@@ -103,9 +103,16 @@ def run_optimized_study():
     total_voxels = mask_lab.size
     fluid_voxels_initial = int(np.sum(mask_lab == 0))
     initial_porosity = fluid_voxels_initial / total_voxels
+    
+    estimated_wall_time_s = (total_voxels * total_steps) / 120_000_000 + 60
+    estimated_mins = estimated_wall_time_s / 60.0
+    
     print(f"[INIT] Domain shape: {mask_lab.shape} | Total voxels: {total_voxels}")
     print(f"[INIT] Initial fluid voxels: {fluid_voxels_initial}")
-    print(f"[INIT] Initial porosity (geometric): {initial_porosity*100:.2f}%\n")
+    print(f"[INIT] Initial porosity (geometric): {initial_porosity*100:.2f}%")
+    print(f"======================================================================")
+    print(f" ESTIMATED COMPUTE TIME: ~{estimated_mins:.1f} minutes")
+    print(f"======================================================================\n")
 
     sim = ThermoGravityFlowSim(geometry_mask=mask_lab, housing_mask=housing_mask, inlet_idx=inlet_idx, outlet_idx=outlet_idx, scaling=sc,
                                lattice=LatticeD3Q19("f32/f32"), nx=nx, ny=ny, nz=nz, omega=1.0/sc.tau, precision="f32/f32", print_info_rate=0)

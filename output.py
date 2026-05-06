@@ -6,23 +6,44 @@ import json
 import porespy as ps
 from skimage import measure
 
-def visualize_thermo_planes(u_final, c_final, t_final, dc_final, s_final, geometry_mask, output_dir, suffix=""):
+def visualize_thermo_planes(u_final, c_final, t_final, dc_final, s_final, geometry_mask, output_dir, suffix="", dx_microns=22.0):
     plt.style.use('default')
-    nx, ny, nz, _ = u_final.shape; mid_z = nz // 2; geom_slice = geometry_mask[:, :, mid_z].T
+    nx, ny, nz, _ = u_final.shape
+    mid_z = nz // 2
+    geom_slice_z = geometry_mask[:, :, mid_z].T
+    
     fig, axes = plt.subplots(5, 1, figsize=(10, 25))
-    fig.suptitle(f"Thermo-Solute Debug {suffix}", fontsize=14)
-    titles = ["Velocity magnitude", "Solute c (norm)", "Temperature (norm)", "Supersaturation Δc (g/100mL)", "Solid fraction φ_s (accumulated)"]
-    mag = np.sqrt(u_final[:, :, mid_z, 0]**2 + u_final[:, :, mid_z, 1]**2)
-    axes[0].imshow(mag.T, origin='lower', cmap='turbo')
-    axes[1].imshow(c_final[:, :, mid_z, 0].T, origin='lower', cmap='viridis', vmin=0, vmax=1.0)
-    axes[2].imshow(t_final[:, :, mid_z, 0].T, origin='lower', cmap='inferno', vmin=0, vmax=1.0)
-    axes[3].imshow(dc_final[:, :, mid_z, 0].T, origin='lower', cmap='plasma')
-    axes[4].imshow(np.clip(s_final[:, :, mid_z, 0].T, 0.0, 1.0), origin='lower', cmap='cividis', vmin=0, vmax=1.0)
-    for ax, ttl in zip(axes, titles):
-        ax.imshow(np.where(geom_slice == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3)
-        ax.set_title(ttl, fontsize=10)
-        ax.axis('off')
-    plt.tight_layout(rect=[0, 0, 1, 0.98]); plt.savefig(output_dir / f"debug_summary{suffix}.png"); plt.close()
+    fig.suptitle(f"Thermo-Solute Debug {suffix}", fontsize=16)
+    
+    extent_z = [0, nx * dx_microns / 1000, 0, ny * dx_microns / 1000] # x (mm), y (mm)
+    
+    titles_z = ["Velocity magnitude", "Solute c (norm)", "Temperature (norm)", "Supersaturation Δc (g/100mL)", "Solid fraction φ_s (accumulated)"]
+    cbar_labels = ["Velocity (Lattice Units)", "Solute (Normalized)", "Temperature (Normalized)", "Δc (g/100mL)", "Solid Fraction φ_s"]
+    
+    mag_z = np.sqrt(u_final[:, :, mid_z, 0]**2 + u_final[:, :, mid_z, 1]**2)
+    
+    vmax_u = 0.05
+    vmax_dc = 10.0
+    
+    im_u_z = axes[0].imshow(mag_z.T, origin='lower', cmap='turbo', extent=extent_z, vmin=0, vmax=vmax_u)
+    im_c_z = axes[1].imshow(c_final[:, :, mid_z, 0].T, origin='lower', cmap='viridis', extent=extent_z, vmin=0, vmax=1.0)
+    im_t_z = axes[2].imshow(t_final[:, :, mid_z, 0].T, origin='lower', cmap='inferno', extent=extent_z, vmin=0, vmax=1.0)
+    im_dc_z = axes[3].imshow(dc_final[:, :, mid_z, 0].T, origin='lower', cmap='plasma', extent=extent_z, vmin=-1.0, vmax=vmax_dc)
+    im_s_z = axes[4].imshow(np.clip(s_final[:, :, mid_z, 0].T, 0.0, 1.0), origin='lower', cmap='cividis', extent=extent_z, vmin=0, vmax=1.0)
+    
+    ims_z = [im_u_z, im_c_z, im_t_z, im_dc_z, im_s_z]
+    
+    for i, ax in enumerate(axes):
+        ax.imshow(np.where(geom_slice_z == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3, extent=extent_z)
+        ax.set_title(titles_z[i], fontsize=12)
+        ax.set_xlabel("X (mm)")
+        ax.set_ylabel("Y (mm)")
+        cbar_z = fig.colorbar(ims_z[i], ax=ax, fraction=0.046, pad=0.04)
+        cbar_z.set_label(cbar_labels[i], fontsize=10)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    plt.savefig(output_dir / f"debug_summary{suffix}.png")
+    plt.close()
 
 def save_vti_snapshot(output_dir, step, u, c, t, s, rho, mask, dx_microns=22.0, dt_seconds=1.0):
     """
@@ -50,7 +71,7 @@ def save_vti_snapshot(output_dir, step, u, c, t, s, rho, mask, dx_microns=22.0, 
 
 def save_z_projection(output_dir, step, s_field, mask, dx_microns=22.0):
     """
-    Project the solid fraction along the z-axis and y-axis. Save as PNG.
+    Project the solid fraction along the z-axis. Save as PNG.
     Filename: f"zproj_step_{step:08d}.png". Use cmap='cividis', overlay mask outline at
     alpha=0.3 in gray. Includes physical scales and consistent color limits.
     """
@@ -58,31 +79,20 @@ def save_z_projection(output_dir, step, s_field, mask, dx_microns=22.0):
     nx, ny, nz, _ = s_field.shape
     
     extent_z = [0, nx * dx_microns / 1000, 0, ny * dx_microns / 1000] # x (mm), y (mm)
-    extent_y = [0, nx * dx_microns / 1000, 0, nz * dx_microns / 1000] # x (mm), z (mm)
 
-    # Project maximum solid fraction along Z and Y
+    # Project maximum solid fraction along Z
     s_proj_z = np.max(np.clip(s_field[..., 0], 0.0, 1.0), axis=2)
     mask_proj_z = np.max(mask, axis=2) 
     
-    s_proj_y = np.max(np.clip(s_field[..., 0], 0.0, 1.0), axis=1)
-    mask_proj_y = np.max(mask, axis=1)
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.set_title(f"Maximum Solid Fraction $\\varphi_s$ Projection @ step {step}", fontsize=16)
 
-    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
-    fig.suptitle(f"Maximum Solid Fraction $\\varphi_s$ Projection @ step {step}", fontsize=16)
-
-    im_z = axes[0].imshow(s_proj_z.T, origin='lower', cmap='cividis', extent=extent_z, vmin=0, vmax=1.0)
-    axes[0].imshow(np.where(mask_proj_z.T == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3, extent=extent_z)
-    axes[0].set_title("Z-Axis Projection", fontsize=14)
-    axes[0].set_xlabel("X (mm)")
-    axes[0].set_ylabel("Y (mm)")
-    fig.colorbar(im_z, ax=axes[0], fraction=0.046, pad=0.04)
-
-    im_y = axes[1].imshow(s_proj_y.T, origin='lower', cmap='cividis', extent=extent_y, vmin=0, vmax=1.0)
-    axes[1].imshow(np.where(mask_proj_y.T == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3, extent=extent_y)
-    axes[1].set_title("Y-Axis Projection", fontsize=14)
-    axes[1].set_xlabel("X (mm)")
-    axes[1].set_ylabel("Z (mm)")
-    fig.colorbar(im_y, ax=axes[1], fraction=0.046, pad=0.04)
+    im_z = ax.imshow(s_proj_z.T, origin='lower', cmap='cividis', extent=extent_z, vmin=0, vmax=1.0)
+    ax.imshow(np.where(mask_proj_z.T == 1, 1.0, np.nan), origin='lower', cmap='gray', alpha=0.3, extent=extent_z)
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    cbar_z = fig.colorbar(im_z, ax=ax, fraction=0.046, pad=0.04)
+    cbar_z.set_label("Solid Fraction $\\varphi_s$", fontsize=12)
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(output_dir / f"zproj_step_{step:08d}.png")
