@@ -64,7 +64,7 @@ class ThermoScaling:
         # Solute (CuSO4)
         self.d_phys = d_phys
         self.d_lu_target = self.d_phys * (self.dt / self.dx**2)
-        self.tau_c = max(0.55, self.d_lu_target / self.cs2 + 0.5)
+        self.tau_c = max(0.505, self.d_lu_target / self.cs2 + 0.5)
         self.d_lu = (self.tau_c - 0.5) * self.cs2
         self.omega_c = 1.0 / self.tau_c
 
@@ -239,14 +239,11 @@ class ThermoGravityFlowSim(BGKSim):
 
         self.inlet_bc  = EquilibriumBC(self.in_idx_tuple,  self.gridInfo, self.precisionPolicy, rho_one_in,  u_zeros_in)
         self.outlet_bc = EquilibriumBC(self.out_idx_tuple, self.gridInfo, self.precisionPolicy, rho_one_out, u_zeros_out)
-        self.BCs.append(BounceBack(tuple(self.solid_idx.T), self.gridInfo, self.precisionPolicy))
 
         self.solute_inlet_bc = EquilibriumBC(self.in_idx_tuple, self.gridInfo, self.precisionPolicy,
                                              jnp.zeros((len(self.custom_inlet_idx), 1)), u_zeros_in)
-        self.solute_BCs.append(BounceBack(tuple(self.solid_idx.T), self.gridInfo, self.precisionPolicy))
 
         housing_indices = np.argwhere(self.housing_mask == 1)
-        self.thermal_BCs.append(BounceBack(tuple(housing_indices.T), self.gridInfo, self.precisionPolicy))
 
     def apply_passive_bc(self, gout, gin, t, implementation_step, bc_list):
         for bc in bc_list:
@@ -291,13 +288,16 @@ class ThermoGravityFlowSim(BGKSim):
         
         # A) Calculate solid fraction (phi_s). 
         phi_s = jnp.clip(s_comp / 1.0, 0.0, 1.0)
+
+        # Unified mask includes static rock
+        rock_mask = jnp.array(self.geometry_mask == 1, dtype=f_comp.dtype)[..., None]
+        phi_s_total = jnp.maximum(phi_s, rock_mask)
         
-        # CREATE HYDRODYNAMIC VALVE FOR SHUT-IN (Perfect Mass Conservation)
         valve_mask = jnp.zeros_like(phi_s)
         valve_mask = valve_mask.at[self.in_idx_tuple].set(1.0)
         valve_mask = valve_mask.at[self.out_idx_tuple].set(1.0)
         
-        effective_phi_s = jnp.where(shutin, jnp.maximum(phi_s, valve_mask), phi_s)
+        effective_phi_s = jnp.where(shutin, jnp.maximum(phi_s_total, valve_mask), phi_s_total)
         
         # B) DAMPEN VELOCITY: Kill momentum inside solid to prevent acoustic shocks.
         u_damped = jnp.where(fluid_mask, u * (1.0 - effective_phi_s), 0.0)
@@ -386,27 +386,28 @@ class ThermoGravityFlowSim(BGKSim):
 
         # 3. THERMAL
         temp_mac = jnp.sum(h_comp, axis=-1, keepdims=True)
-        heq      = self.equilibrium(temp_mac, u, cast_output=False)
-        hout     = h_comp - self.omega_t_field * (h_comp - heq)
+        heq      = self.equilibrium(temp_mac, u_damped, cast_output=False)
+        h_fluid  = h_comp - self.omega_t_field * (h_comp - heq)
+        h_solid  = h_comp[..., opp_idx]
+        hout     = (1.0 - effective_phi_s) * h_fluid + effective_phi_s * h_solid
         hout     = self.apply_passive_bc(self.precisionPolicy.cast_to_output(hout), h, t, "PostCollision", self.thermal_BCs)
         h_post   = self.streaming(hout)
 
         # 4. BCs
         u_in_target = (effective_u_in / self.inlet_porosity) * v_ramp
         v_in_ramp   = jnp.zeros((len(self.custom_inlet_idx),  3)).at[:, 0].set(u_in_target)
+        v_out_ramp  = jnp.zeros((len(self.custom_outlet_idx), 3)).at[:, 0].set(u_in_target)
 
         # FLUID BCs
         f_final = self.apply_bc(f_post, fout, t, "PostStreaming")
         
-        # FIX 1: Inlet - Force Velocity, Float Density (Allows Pressure to build!)
-        rho_in_current = rho[self.in_idx_tuple]
-        feq_in = self.inlet_bc.equilibrium(rho_in_current, v_in_ramp)
+        # Inlet: Force BOTH Density AND Velocity (original, working version)
+        feq_in = self.inlet_bc.equilibrium(jnp.ones((len(self.custom_inlet_idx), 1)), v_in_ramp)
         f_final_in = jnp.where(shutin, f_post[self.in_idx_tuple], self.precisionPolicy.cast_to_output(feq_in))
         f_final = f_final.at[self.in_idx_tuple].set(f_final_in)
         
-        # FIX 2: Outlet - Force Density (P=0), Float Velocity (Allows fluid to leave naturally)
-        u_out_current = u[self.out_idx_tuple]
-        feq_out = self.outlet_bc.equilibrium(jnp.ones((len(self.custom_outlet_idx), 1)), u_out_current)
+        # Outlet: Force Density (P=0) AND Prescribed Velocity
+        feq_out = self.outlet_bc.equilibrium(jnp.ones((len(self.custom_outlet_idx), 1)), v_out_ramp)
         f_final_out = jnp.where(shutin, f_post[self.out_idx_tuple], self.precisionPolicy.cast_to_output(feq_out))
         f_final = f_final.at[self.out_idx_tuple].set(f_final_out)
 
@@ -421,8 +422,8 @@ class ThermoGravityFlowSim(BGKSim):
         outlet_count = jnp.maximum(1.0, jnp.sum(self.outlet_plane_fluid_mask))
         c_avg_xm2   = jnp.sum(jnp.where(self.outlet_plane_fluid_mask, c_mac_xm2, 0.0)) / outlet_count
         
-        # FIX 3: Solute Outlet uses floating fluid velocity
-        geq_out_sol = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), c_avg_xm2), u_out_current)
+        # Solute Outlet uses prescribed velocity
+        geq_out_sol = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), c_avg_xm2), v_out_ramp)
         g_final_out = jnp.where(shutin, g_post[self.out_idx_tuple], self.precisionPolicy.cast_to_output(geq_out_sol))
         g_final = g_final.at[self.out_idx_tuple].set(g_final_out)
 
@@ -436,8 +437,8 @@ class ThermoGravityFlowSim(BGKSim):
         t_mac_xm2   = jnp.sum(self.precisionPolicy.cast_to_compute(h_post[-2]), axis=-1)
         t_avg_xm2   = jnp.sum(jnp.where(self.outlet_plane_fluid_mask, t_mac_xm2, 0.0)) / outlet_count
         
-        # FIX 4: Thermal Outlet uses floating fluid velocity
-        heq_out     = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), t_avg_xm2), u_out_current)
+        # Thermal Outlet uses prescribed velocity
+        heq_out     = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), t_avg_xm2), v_out_ramp)
         h_final = h_final.at[self.out_idx_tuple].set(self.precisionPolicy.cast_to_output(heq_out))
 
         # Housing-wall resistive cooling.
@@ -466,6 +467,21 @@ class ThermoGravityFlowSim(BGKSim):
         f_final = f_final.at[self.solid_out_idx].set(f_final[self.solid_out_adj])
         g_final = g_final.at[self.solid_out_idx].set(g_final[self.solid_out_adj])
         h_final = h_final.at[self.solid_out_idx].set(h_final[self.solid_out_adj])
+
+        # MASS DIAGNOSTIC: Print solute mass budget every 2500 steps
+        def _mass_diag():
+            c_mac_final = jnp.sum(self.precisionPolicy.cast_to_compute(g_final), axis=-1)
+            fluid_mask_3d = (self.geometry_mask == 0)
+            total_fluid_mass = jnp.sum(jnp.where(fluid_mask_3d, c_mac_final, 0.0))
+            total_solid_mass = jnp.sum(jnp.where(~fluid_mask_3d, c_mac_final, 0.0))
+            inlet_mass = jnp.sum(c_mac_final[0])   # x=0 plane total
+            outlet_mass = jnp.sum(c_mac_final[-1])  # x=nx-1 plane total
+            x1_mass = jnp.sum(c_mac_final[1])       # x=1 plane  
+            xm2_mass = jnp.sum(c_mac_final[-2])     # x=nx-2 plane
+            mid_mass = jnp.sum(c_mac_final[68])      # middle plane
+            #jax.debug.print("MASS_DIAG | fluid:{fm:.1f} | solid:{sm:.1f} | x0:{x0:.1f} | x1:{x1:.1f} | mid:{mid:.1f} | xm2:{xm2:.1f} | xN:{xn:.1f}",
+                fm=total_fluid_mass, sm=total_solid_mass, x0=inlet_mass, x1=x1_mass, mid=mid_mass, xm2=xm2_mass, xn=outlet_mass)
+        jax.lax.cond(t % 2500 == 0, _mass_diag, lambda: None)
 
         return f_final, g_final, h_final, precipitation_amount
 
