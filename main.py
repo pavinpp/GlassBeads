@@ -42,7 +42,6 @@ def run_optimized_study():
     parser.add_argument("--shutin_time", type=float, default=2.0, help="Duration of the shut-in phase (seconds) at the end of the run")
     parser.add_argument("--flow_rate", type=float, default=15.0, help="Injection flow rate in mL/hr")
     parser.add_argument("--crop_mm", type=float, default=1.2, help="Size of the central crop cube in mm")
-    parser.add_argument("--ramp_time", type=float, default=0.05, help="Time to ramp up the flow in seconds")
     args = parser.parse_args()
 
     # 1. Scale Initialization & Domain Config
@@ -54,7 +53,7 @@ def run_optimized_study():
         delta_c_nuc_phys=2.0,
         delta_c_grow_phys=0.5,
         base_k_nuc=0.001,
-        base_k_grow=0.025
+        base_k_grow=0.25 #old is 0.025, increased to speed up precipitation for testing
     )
 
     # 2. Dynamic Shut-In Calculation
@@ -62,7 +61,7 @@ def run_optimized_study():
     if inject_time < 0:
         raise ValueError("Error: --shutin_time cannot be greater than total --time")
     
-    total_steps = sc.print_summary(args.time, ramp_time_phys=args.ramp_time)
+    total_steps = sc.print_summary(args.time, flow_time_phys=inject_time)
     shutin_step = int(inject_time / sc.dt)
     
     print(f"[INIT] Flow Phase: 0 to {shutin_step} steps ({inject_time:.2f}s)")

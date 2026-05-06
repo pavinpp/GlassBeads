@@ -22,9 +22,10 @@ def run_sanity_mass_balance():
     DX = 22e-6
     DT = 3.2267e-5
     L = 2.0e-3
+    C_REF = 80.575  # Add this thermodynamic reference constant
     C_IN = 60.0
-    VOXEL_MASS_MG = 6.389e-6
-    DOMAIN_VOL_ML = (L * 100)**3  # 0.008 mL
+    VOXEL_MASS_MG = 8.580e-6  # Update to correctly scaled voxel mass
+    DOMAIN_VOL_ML = (L * 100)**3
     VOX_VOL_ML = (DX * 100)**3
     
     project_root = Path(__file__).resolve().parent
@@ -85,8 +86,8 @@ def run_sanity_mass_balance():
             m_out_actual = np.zeros_like(times)
 
         m_crystal = precip_vols * VOXEL_MASS_MG
-        # Actual fluid mass calculation
-        m_fluid = c_avgs * (C_IN / 100.0) * (porosities * initial_fluid_vol_ml) * 1000.0
+        # Actual fluid mass calculation MUST use C_REF to decode normalized c_avgs
+        m_fluid = c_avgs * (C_REF / 100.0) * (porosities * initial_fluid_vol_ml) * 1000.0
 
         # Calculate Mass Balance Error (Residual)
         m_total_tracked = m_fluid + m_crystal + m_out_actual
@@ -134,7 +135,8 @@ def run_sanity_mass_balance():
             "final_crystal": m_crystal[-1],
             "final_out": m_out_actual[-1],
             "yield": yield_pct,
-            "max_error_pct": np.max(m_error_pct)
+            "max_error_pct": np.max(m_error_pct),
+            "final_error": final_err_pct
         })
 
     # Group by FR for the bar chart with error bars
@@ -162,10 +164,10 @@ def run_sanity_mass_balance():
     plt.savefig(results_dir / "sanity_mass_partition.png", dpi=150)
     plt.close()
     
-    print(f"{'FR':<6} | {'Total Injected (mg)':<20} | {'Final in Fluid (mg)':<20} | {'Final in Crystal (mg)':<22} | {'Final Outflow (mg)':<20} | {'Yield (%)':<10}")
-    print("-" * 115)
+    print(f"{'FR':<6} | {'Total Injected (mg)':<20} | {'Final in Fluid (mg)':<20} | {'Final in Crystal (mg)':<22} | {'Final Outflow (mg)':<20} | {'Yield (%)':<10} | {'Final Error (%)':<15}")
+    print("-" * 132)
     for row in summary_data:
-        print(f"{row['fr']:<6} | {row['total_in']:<20.4f} | {row['final_fluid']:<20.4f} | {row['final_crystal']:<22.4f} | {row['final_out']:<20.4f} | {row['yield']:<10.2f}")
+        print(f"{row['fr']:<6} | {row['total_in']:<20.4f} | {row['final_fluid']:<20.4f} | {row['final_crystal']:<22.4f} | {row['final_out']:<20.4f} | {row['yield']:<10.2f} | {row['final_error']:<15.4f}")
     
     print("\n[INFO] Solute mass partition analysis complete.")
 

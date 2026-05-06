@@ -22,7 +22,7 @@ class ThermoScaling:
                  g_phys=-9.81, mach_per_mm=0.004, 
                  delta_c_nuc_phys=5.0, delta_c_grow_phys=0.5,
                  base_k_nuc=0.001, base_k_grow=0.025, phi_s_seed=0.01,
-                 base_alpha_flow=0.0001, base_alpha_shutin=0.005):
+                 base_alpha_flow=0.0001, base_alpha_shutin=0.05): # old base_alpha_shutin = 0.005 
         
         self.dx = dx_microns * 1e-6
         self.q_ml_hr = q_ml_hr
@@ -126,12 +126,15 @@ class ThermoScaling:
         denominator = 1.0 - s_eq / (self.rho_solid_phys * 100.0)
         return (c_in - s_eq) / denominator
 
-    def ramp_steps_from_time(self, ramp_time_phys):
-        return max(1, int(ramp_time_phys / self.dt))
-
-    def print_summary(self, physical_time_s, ramp_time_phys=0.05):
+    def print_summary(self, physical_time_s, flow_time_phys):
         steps = int(physical_time_s / self.dt)
-        ramp_steps = self.ramp_steps_from_time(ramp_time_phys)
+        
+        # Calculate dynamic ramps used by the engine
+        v_ramp_time = min(flow_time_phys * 0.04, 0.4)
+        c_ramp_add = min(flow_time_phys * 0.06, 0.6)
+        c_ramp_time = v_ramp_time + c_ramp_add
+        v_ramp_steps = max(1, int(v_ramp_time / self.dt))
+
         print("\n" + "="*70)
         print("  JAX-LaB DIGITAL TWIN: THERMO-SOLUTE SIMULATION")
         print("="*70)
@@ -155,7 +158,8 @@ class ThermoScaling:
         print(f"  Rigorous Δm:          {self._compute_rigorous_precip():.2f} g/100mL")
         print("-" * 70)
         print(f"  Simulation Goal:      {physical_time_s} s → {steps} steps")
-        print(f"  Ramp:                 {ramp_time_phys} s → {ramp_steps} steps  ({100*ramp_steps/steps:.1f}% of run)")
+        print(f"  Dynamic Ramps:        Velocity: {v_ramp_time:.3f}s | Solute/Temp: {c_ramp_time:.3f}s")
+        print(f"                        (Velocity Ramp takes {v_ramp_steps} steps)")
         print("="*70 + "\n")
         return steps
 
@@ -480,7 +484,7 @@ class ThermoGravityFlowSim(BGKSim):
             xm2_mass = jnp.sum(c_mac_final[-2])     # x=nx-2 plane
             mid_mass = jnp.sum(c_mac_final[68])      # middle plane
             #jax.debug.print("MASS_DIAG | fluid:{fm:.1f} | solid:{sm:.1f} | x0:{x0:.1f} | x1:{x1:.1f} | mid:{mid:.1f} | xm2:{xm2:.1f} | xN:{xn:.1f}",
-                fm=total_fluid_mass, sm=total_solid_mass, x0=inlet_mass, x1=x1_mass, mid=mid_mass, xm2=xm2_mass, xn=outlet_mass)
+            #    fm=total_fluid_mass, sm=total_solid_mass, x0=inlet_mass, x1=x1_mass, mid=mid_mass, xm2=xm2_mass, xn=outlet_mass)
         jax.lax.cond(t % 2500 == 0, _mass_diag, lambda: None)
 
         return f_final, g_final, h_final, precipitation_amount
