@@ -169,17 +169,18 @@ class ThermoScaling:
 # =============================================================================
 class ThermoGravityFlowSim(BGKSim):
     def __init__(self, geometry_mask, housing_mask, inlet_idx, outlet_idx, scaling, **kwargs):
-        self.geometry_mask = geometry_mask
-        self.housing_mask  = housing_mask
-        self.custom_inlet_idx  = inlet_idx
-        self.custom_outlet_idx = outlet_idx
+        self.geometry_mask = jnp.array(geometry_mask, dtype=jnp.uint8)
+        self.housing_mask  = jnp.array(housing_mask, dtype=jnp.uint8)
+        self.n_inlet = inlet_idx.shape[0]
+        self.n_outlet = outlet_idx.shape[0]
         self.scaling = scaling
 
         self.solute_BCs  = []
         self.thermal_BCs = []
-        self.solid_idx   = np.argwhere(self.geometry_mask == 1)
-        self.in_idx_tuple  = tuple(self.custom_inlet_idx.T)
-        self.out_idx_tuple = tuple(self.custom_outlet_idx.T)
+        
+        # Convert index tuples to JAX arrays to prevent XLA from unrolling massive scatters
+        self.in_idx_tuple  = tuple(jnp.array(x) for x in inlet_idx.T)
+        self.out_idx_tuple = tuple(jnp.array(x) for x in outlet_idx.T)
 
         nx_val, ny_val, nz_val = self.geometry_mask.shape
         self.x_coords = jnp.arange(nx_val).reshape(nx_val, 1, 1, 1)
@@ -198,15 +199,15 @@ class ThermoGravityFlowSim(BGKSim):
         self.outlet_plane_fluid_mask = jnp.array((self.geometry_mask[nx_val - 2] == 0) & circle_mask)
 
         # Periodic isolation
-        solid_in = np.argwhere(self.geometry_mask[0] == 1)
+        solid_in = np.argwhere(geometry_mask[0] == 1)
         solid_in = np.insert(solid_in, 0, 0, axis=1)
-        self.solid_in_idx  = tuple(solid_in.T)
-        self.solid_in_adj  = (solid_in[:, 0] + 1, solid_in[:, 1], solid_in[:, 2])
+        self.solid_in_idx  = tuple(jnp.array(x) for x in solid_in.T)
+        self.solid_in_adj  = (jnp.array(solid_in[:, 0] + 1), jnp.array(solid_in[:, 1]), jnp.array(solid_in[:, 2]))
 
-        solid_out = np.argwhere(self.geometry_mask[-1] == 1)
+        solid_out = np.argwhere(geometry_mask[-1] == 1)
         solid_out = np.insert(solid_out, 0, nx_val - 1, axis=1)
-        self.solid_out_idx = tuple(solid_out.T)
-        self.solid_out_adj = (solid_out[:, 0] - 1, solid_out[:, 1], solid_out[:, 2])
+        self.solid_out_idx = tuple(jnp.array(x) for x in solid_out.T)
+        self.solid_out_adj = (jnp.array(solid_out[:, 0] - 1), jnp.array(solid_out[:, 1]), jnp.array(solid_out[:, 2]))
 
         self.omega_t_field = jnp.where(
             self.geometry_mask == 1,
@@ -215,9 +216,16 @@ class ThermoGravityFlowSim(BGKSim):
         )[..., None]
 
         # Housing-wall thermal BC infrastructure
-        housing_idx = np.argwhere(self.housing_mask == 1)
-        self.housing_idx_tuple = tuple(housing_idx.T)
+        housing_idx = np.argwhere(housing_mask == 1)
+        self.housing_idx_tuple = tuple(jnp.array(x) for x in housing_idx.T)
         self.n_housing_cells = housing_idx.shape[0]
+
+        # Precompute static masks to avoid dynamic graph explosion during JIT
+        self.rock_mask = jnp.array(geometry_mask == 1, dtype=jnp.float32)[..., None]
+        v_mask = np.zeros(geometry_mask.shape + (1,), dtype=np.float32)
+        v_mask[inlet_idx[:, 0], inlet_idx[:, 1], inlet_idx[:, 2]] = 1.0
+        v_mask[outlet_idx[:, 0], outlet_idx[:, 1], outlet_idx[:, 2]] = 1.0
+        self.valve_mask = jnp.array(v_mask)
 
         super().__init__(**kwargs)
 
@@ -236,18 +244,16 @@ class ThermoGravityFlowSim(BGKSim):
         return self.precisionPolicy.cast_to_output(rho), self.precisionPolicy.cast_to_output(u)
 
     def set_boundary_conditions(self):
-        u_zeros_in  = jnp.zeros((len(self.custom_inlet_idx),  3))
-        u_zeros_out = jnp.zeros((len(self.custom_outlet_idx), 3))
-        rho_one_in  = jnp.ones ((len(self.custom_inlet_idx),  1))
-        rho_one_out = jnp.ones ((len(self.custom_outlet_idx), 1))
+        u_zeros_in  = jnp.zeros((self.n_inlet,  3))
+        u_zeros_out = jnp.zeros((self.n_outlet, 3))
+        rho_one_in  = jnp.ones ((self.n_inlet,  1))
+        rho_one_out = jnp.ones ((self.n_outlet, 1))
 
         self.inlet_bc  = EquilibriumBC(self.in_idx_tuple,  self.gridInfo, self.precisionPolicy, rho_one_in,  u_zeros_in)
         self.outlet_bc = EquilibriumBC(self.out_idx_tuple, self.gridInfo, self.precisionPolicy, rho_one_out, u_zeros_out)
 
         self.solute_inlet_bc = EquilibriumBC(self.in_idx_tuple, self.gridInfo, self.precisionPolicy,
-                                             jnp.zeros((len(self.custom_inlet_idx), 1)), u_zeros_in)
-
-        housing_indices = np.argwhere(self.housing_mask == 1)
+                                             jnp.zeros((self.n_inlet, 1)), u_zeros_in)
 
     def apply_passive_bc(self, gout, gin, t, implementation_step, bc_list):
         for bc in bc_list:
@@ -294,14 +300,8 @@ class ThermoGravityFlowSim(BGKSim):
         phi_s = jnp.clip(s_comp / 1.0, 0.0, 1.0)
 
         # Unified mask includes static rock
-        rock_mask = jnp.array(self.geometry_mask == 1, dtype=f_comp.dtype)[..., None]
-        phi_s_total = jnp.maximum(phi_s, rock_mask)
-        
-        valve_mask = jnp.zeros_like(phi_s)
-        valve_mask = valve_mask.at[self.in_idx_tuple].set(1.0)
-        valve_mask = valve_mask.at[self.out_idx_tuple].set(1.0)
-        
-        effective_phi_s = jnp.where(shutin, jnp.maximum(phi_s_total, valve_mask), phi_s_total)
+        phi_s_total = jnp.maximum(phi_s, self.rock_mask)
+        effective_phi_s = jnp.where(shutin, jnp.maximum(phi_s_total, self.valve_mask), phi_s_total)
         
         # B) DAMPEN VELOCITY: Kill momentum inside solid to prevent acoustic shocks.
         u_damped = jnp.where(fluid_mask, u * (1.0 - effective_phi_s), 0.0)
@@ -399,26 +399,26 @@ class ThermoGravityFlowSim(BGKSim):
 
         # 4. BCs
         u_in_target = (effective_u_in / self.inlet_porosity) * v_ramp
-        v_in_ramp   = jnp.zeros((len(self.custom_inlet_idx),  3)).at[:, 0].set(u_in_target)
-        v_out_ramp  = jnp.zeros((len(self.custom_outlet_idx), 3)).at[:, 0].set(u_in_target)
+        v_in_ramp   = jnp.zeros((self.n_inlet,  3)).at[:, 0].set(u_in_target)
+        v_out_ramp  = jnp.zeros((self.n_outlet, 3)).at[:, 0].set(u_in_target)
 
         # FLUID BCs
         f_final = self.apply_bc(f_post, fout, t, "PostStreaming")
         
         # Inlet: Force BOTH Density AND Velocity (original, working version)
-        feq_in = self.inlet_bc.equilibrium(jnp.ones((len(self.custom_inlet_idx), 1)), v_in_ramp)
+        feq_in = self.inlet_bc.equilibrium(jnp.ones((self.n_inlet, 1)), v_in_ramp)
         f_final_in = jnp.where(shutin, f_post[self.in_idx_tuple], self.precisionPolicy.cast_to_output(feq_in))
         f_final = f_final.at[self.in_idx_tuple].set(f_final_in)
         
         # Outlet: Force Density (P=0) AND Prescribed Velocity
-        feq_out = self.outlet_bc.equilibrium(jnp.ones((len(self.custom_outlet_idx), 1)), v_out_ramp)
+        feq_out = self.outlet_bc.equilibrium(jnp.ones((self.n_outlet, 1)), v_out_ramp)
         f_final_out = jnp.where(shutin, f_post[self.out_idx_tuple], self.precisionPolicy.cast_to_output(feq_out))
         f_final = f_final.at[self.out_idx_tuple].set(f_final_out)
 
         # SOLUTE BCs
         g_final  = self.apply_passive_bc(g_post, gout, t, "PostStreaming", self.solute_BCs)
         c_in_injection = jnp.where(shutin, 0.0, self.scaling.c_in_norm * c_ramp)
-        geq_in_sol = self.solute_inlet_bc.equilibrium(jnp.full((len(self.custom_inlet_idx), 1), c_in_injection), v_in_ramp)
+        geq_in_sol = self.solute_inlet_bc.equilibrium(jnp.full((self.n_inlet, 1), c_in_injection), v_in_ramp)
         g_final_in = jnp.where(shutin, g_post[self.solute_inlet_bc.indices], self.precisionPolicy.cast_to_output(geq_in_sol))
         g_final = g_final.at[self.solute_inlet_bc.indices].set(g_final_in)
         
@@ -427,14 +427,14 @@ class ThermoGravityFlowSim(BGKSim):
         c_avg_xm2   = jnp.sum(jnp.where(self.outlet_plane_fluid_mask, c_mac_xm2, 0.0)) / outlet_count
         
         # Solute Outlet uses prescribed velocity
-        geq_out_sol = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), c_avg_xm2), v_out_ramp)
+        geq_out_sol = self.outlet_bc.equilibrium(jnp.full((self.n_outlet, 1), c_avg_xm2), v_out_ramp)
         g_final_out = jnp.where(shutin, g_post[self.out_idx_tuple], self.precisionPolicy.cast_to_output(geq_out_sol))
         g_final = g_final.at[self.out_idx_tuple].set(g_final_out)
 
         # THERMAL BCs
         h_final = self.apply_passive_bc(h_post, hout, t, "PostStreaming", self.thermal_BCs)
         t_in_injection = self.scaling.t_hot * v_ramp
-        heq_in_therm = self.inlet_bc.equilibrium(jnp.full((len(self.custom_inlet_idx), 1), t_in_injection), v_in_ramp)
+        heq_in_therm = self.inlet_bc.equilibrium(jnp.full((self.n_inlet, 1), t_in_injection), v_in_ramp)
         h_final_in = jnp.where(shutin, h_post[self.inlet_bc.indices], self.precisionPolicy.cast_to_output(heq_in_therm))
         h_final = h_final.at[self.inlet_bc.indices].set(h_final_in)
         
@@ -442,7 +442,7 @@ class ThermoGravityFlowSim(BGKSim):
         t_avg_xm2   = jnp.sum(jnp.where(self.outlet_plane_fluid_mask, t_mac_xm2, 0.0)) / outlet_count
         
         # Thermal Outlet uses prescribed velocity
-        heq_out     = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), t_avg_xm2), v_out_ramp)
+        heq_out     = self.outlet_bc.equilibrium(jnp.full((self.n_outlet, 1), t_avg_xm2), v_out_ramp)
         h_final = h_final.at[self.out_idx_tuple].set(self.precisionPolicy.cast_to_output(heq_out))
 
         # Housing-wall resistive cooling.
@@ -542,8 +542,9 @@ class ThermoGravityFlowSim(BGKSim):
             stable = jnp.logical_and(stable, c_max < 2.5)
 
             def print_diagnostics():
-                avg_t_phys = jnp.mean(t_phys[fluid_mask])
-                avg_c = jnp.mean(c_mac_after[fluid_mask])
+                fluid_count = jnp.maximum(1.0, jnp.sum(fluid_mask))
+                avg_t_phys = jnp.sum(jnp.where(fluid_mask, t_phys, 0.0)) / fluid_count
+                avg_c = jnp.sum(jnp.where(fluid_mask, c_mac_after, 0.0)) / fluid_count
                 s_max = jnp.max(jnp.where(fluid_mask, s[..., 0], 0.0))
 
                 # Sample density ONE cell inside the boundary,

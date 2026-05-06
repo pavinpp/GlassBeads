@@ -124,11 +124,19 @@ def run_optimized_study():
     t_current = 0; ma_n = 0.0; stable = True; cum_mass_in = cum_mass_out = cum_vol_in = cum_vol_out = jnp.float32(0.0)
     # Define snapshot steps: 3 between (0, shutin) and 3 between (shutin, total)
     # plus the fixed points: 0, shutin, and total_steps.
-    # Total unique points = 1 (init) + 3 (inject) + 1 (shutin) + 3 (relax) + 1 (final) = 9
-    snapshot_steps = np.unique(np.concatenate([
+    raw_steps = np.unique(np.concatenate([
         np.linspace(0, shutin_step, 5),
         np.linspace(shutin_step, total_steps, 5)
     ]).astype(int)).tolist()
+    
+    snapshot_steps = [0]
+    for s in raw_steps[1:]:
+        if s - snapshot_steps[-1] >= 2500 or s == total_steps:
+            if s == total_steps and s - snapshot_steps[-1] < 2500 and len(snapshot_steps) > 1:
+                snapshot_steps[-1] = s
+            else:
+                snapshot_steps.append(s)
+                
     n_snaps_total = len(snapshot_steps)
 
     csv_path = output_dir / "key_parameters.csv"
