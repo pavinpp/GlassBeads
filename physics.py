@@ -32,8 +32,9 @@ class ThermoScaling:
         self.cs = 1.0 / np.sqrt(3.0)
         self.cs2 = 1.0 / 3.0
 
-        # 1. Compute physical velocity (Darcy) based on domain diameter
-        self.u_darcy_phys = ((self.q_ml_hr * 1e-6) / 3600.0) / (np.pi * (self.diameter / 2.0)**2)
+        # 1. Compute physical velocity based on the FIXED 1.2mm injection tube
+        self.inlet_diameter_phys = 1.2 * 1e-3
+        self.u_darcy_phys = ((self.q_ml_hr * 1e-6) / 3600.0) / (np.pi * (self.inlet_diameter_phys / 2.0)**2)
 
         # 2. Reverse-engineer the required timestep (dt) to hit the target Mach number
         dynamic_target_mach = mach_per_mm * diameter_mm

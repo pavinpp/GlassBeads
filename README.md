@@ -36,6 +36,7 @@ This project implements a multi-physics digital twin that couples:
 ```bash
 python main.py --time 6.0 --shutin_time 3.0 --crop_mm 2.0 --flow_rate 30
 ```
+Note: `--crop_mm` must be at least 1.2 mm (the diameter of the physical injection tube).
 
 ### Parallel Multi-GPU Sweep
 To run a flow-rate sweep across two GPUs simultaneously:

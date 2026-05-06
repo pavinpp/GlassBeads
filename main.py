@@ -44,6 +44,9 @@ def run_optimized_study():
     parser.add_argument("--crop_mm", type=float, default=1.2, help="Size of the central crop cube in mm")
     args = parser.parse_args()
 
+    if args.crop_mm < 1.2:
+        raise ValueError("Error: --crop_mm cannot be less than 1.2 mm (the fixed diameter of the physical injection tube).")
+
     # 1. Scale Initialization & Domain Config
     dx_microns = 22.0
     sc = ThermoScaling(
@@ -89,7 +92,8 @@ def run_optimized_study():
     housing_mask = np.zeros_like(mask_lab)
     housing_mask[:, [0, -1], :] = 1; housing_mask[:, :, [0, -1]] = 1
     mask_lab[:, [0, -1], :] = 1; mask_lab[:, :, [0, -1]] = 1
-    rad_vox = (sc.diameter / 2) / sc.dx; mid_y, mid_z = ny // 2, nz // 2
+    rad_vox = (1.2 * 1e-3 / 2) / sc.dx  # Fixed 1.2mm injection tube
+    mid_y, mid_z = ny // 2, nz // 2
     y_g, z_g = np.meshgrid(np.arange(ny), np.arange(nz), indexing='ij')
     circle = ((y_g - mid_y)**2 + (z_g - mid_z)**2) <= rad_vox**2
     mask_lab[0, ~circle] = 1; mask_lab[-1, ~circle] = 1
