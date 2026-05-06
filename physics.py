@@ -394,19 +394,23 @@ class ThermoGravityFlowSim(BGKSim):
         # 4. BCs
         u_in_target = (effective_u_in / self.inlet_porosity) * v_ramp
         v_in_ramp   = jnp.zeros((len(self.custom_inlet_idx),  3)).at[:, 0].set(u_in_target)
-        v_out_ramp  = jnp.zeros((len(self.custom_outlet_idx), 3)).at[:, 0].set(u_in_target)
 
-        # Fluid BCs
+        # FLUID BCs
         f_final = self.apply_bc(f_post, fout, t, "PostStreaming")
-        feq_in = self.inlet_bc.equilibrium(jnp.ones((len(self.custom_inlet_idx), 1)), v_in_ramp)
+        
+        # FIX 1: Inlet - Force Velocity, Float Density (Allows Pressure to build!)
+        rho_in_current = rho[self.in_idx_tuple]
+        feq_in = self.inlet_bc.equilibrium(rho_in_current, v_in_ramp)
         f_final_in = jnp.where(shutin, f_post[self.in_idx_tuple], self.precisionPolicy.cast_to_output(feq_in))
         f_final = f_final.at[self.in_idx_tuple].set(f_final_in)
         
-        feq_out = self.outlet_bc.equilibrium(jnp.ones((len(self.custom_outlet_idx), 1)), v_out_ramp)
+        # FIX 2: Outlet - Force Density (P=0), Float Velocity (Allows fluid to leave naturally)
+        u_out_current = u[self.out_idx_tuple]
+        feq_out = self.outlet_bc.equilibrium(jnp.ones((len(self.custom_outlet_idx), 1)), u_out_current)
         f_final_out = jnp.where(shutin, f_post[self.out_idx_tuple], self.precisionPolicy.cast_to_output(feq_out))
         f_final = f_final.at[self.out_idx_tuple].set(f_final_out)
 
-        # Solute BCs
+        # SOLUTE BCs
         g_final  = self.apply_passive_bc(g_post, gout, t, "PostStreaming", self.solute_BCs)
         c_in_injection = jnp.where(shutin, 0.0, self.scaling.c_in_norm * c_ramp)
         geq_in_sol = self.solute_inlet_bc.equilibrium(jnp.full((len(self.custom_inlet_idx), 1), c_in_injection), v_in_ramp)
@@ -416,18 +420,24 @@ class ThermoGravityFlowSim(BGKSim):
         c_mac_xm2   = jnp.sum(self.precisionPolicy.cast_to_compute(g_post[-2]), axis=-1)
         outlet_count = jnp.maximum(1.0, jnp.sum(self.outlet_plane_fluid_mask))
         c_avg_xm2   = jnp.sum(jnp.where(self.outlet_plane_fluid_mask, c_mac_xm2, 0.0)) / outlet_count
-        geq_out_sol = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), c_avg_xm2), v_out_ramp)
+        
+        # FIX 3: Solute Outlet uses floating fluid velocity
+        geq_out_sol = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), c_avg_xm2), u_out_current)
         g_final_out = jnp.where(shutin, g_post[self.out_idx_tuple], self.precisionPolicy.cast_to_output(geq_out_sol))
         g_final = g_final.at[self.out_idx_tuple].set(g_final_out)
 
+        # THERMAL BCs
         h_final = self.apply_passive_bc(h_post, hout, t, "PostStreaming", self.thermal_BCs)
         t_in_injection = self.scaling.t_hot * v_ramp
         heq_in_therm = self.inlet_bc.equilibrium(jnp.full((len(self.custom_inlet_idx), 1), t_in_injection), v_in_ramp)
         h_final_in = jnp.where(shutin, h_post[self.inlet_bc.indices], self.precisionPolicy.cast_to_output(heq_in_therm))
         h_final = h_final.at[self.inlet_bc.indices].set(h_final_in)
+        
         t_mac_xm2   = jnp.sum(self.precisionPolicy.cast_to_compute(h_post[-2]), axis=-1)
         t_avg_xm2   = jnp.sum(jnp.where(self.outlet_plane_fluid_mask, t_mac_xm2, 0.0)) / outlet_count
-        heq_out     = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), t_avg_xm2), v_out_ramp)
+        
+        # FIX 4: Thermal Outlet uses floating fluid velocity
+        heq_out     = self.outlet_bc.equilibrium(jnp.full((len(self.custom_outlet_idx), 1), t_avg_xm2), u_out_current)
         h_final = h_final.at[self.out_idx_tuple].set(self.precisionPolicy.cast_to_output(heq_out))
 
         # Housing-wall resistive cooling.
