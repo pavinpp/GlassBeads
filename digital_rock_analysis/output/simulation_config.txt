@@ -1,0 +1,11 @@
+# JAX-LaB Simulation Configuration
+voxel_size_microns: 22.0
+shape_zyx: (318, 88, 318)
+pore_value: 0
+solid_value: 1
+flow_axis: 2
+flow_direction: 1
+inlet_plane: YZ
+inlet_plane_idx: 0
+outlet_plane_idx: 317
+porosity: 0.3920
